@@ -31,6 +31,7 @@ type execEvent struct {
 	Uid      uint32
 	Comm     [16]byte
 	Filename [256]byte
+	Args     [4][64]byte
 }
 type openEvent struct {
 	Pid      uint32
@@ -200,7 +201,21 @@ func readLoop(label string, rd *ringbuf.Reader) {
 			if err := binary.Read(buf, binary.LittleEndian, &ev); err != nil {
 				continue
 			}
-			comm, detail, pid, uid = cstr(ev.Comm[:]), cstr(ev.Filename[:]), ev.Pid, ev.Uid
+			filename := cstr(ev.Filename[:])
+			comm, pid, uid = cstr(ev.Comm[:]), ev.Pid, ev.Uid
+
+			var argParts []string
+			for _, slot := range ev.Args {
+				a := cstr(slot[:])
+				if a != "" {
+					argParts = append(argParts, a)
+				}
+			}
+			if len(argParts) > 0 {
+				detail = filename + " " + strings.Join(argParts, " ")
+			} else {
+				detail = filename
+			}
 
 		case "OPEN":
 			var ev openEvent
@@ -251,6 +266,13 @@ func handleEvent(eventType, comm, detail string, pid, uid uint32) {
 		return
 	}
 
+	// IMPORTANT: LLM call ko goroutine mein bhejo, taaki ring buffer reader
+	// kabhi block na ho — warna slow LLM response ke dauran naye kernel events
+	// silently drop ho jaate hain (ring buffer full ho jaata hai)
+	go processLLM(eventType, comm, detail, pid, uid)
+}
+
+func processLLM(eventType, comm, detail string, pid, uid uint32) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
