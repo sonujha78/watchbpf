@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
+	"sync"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -15,92 +17,148 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 )
 
-// event struct MUST exactly match the C struct in execve.bpf.c (same field order, same sizes)
-type event struct {
+type execEvent struct {
 	Pid      uint32
 	Uid      uint32
 	Comm     [16]byte
 	Filename [256]byte
 }
 
+type openEvent struct {
+	Pid      uint32
+	Uid      uint32
+	Comm     [16]byte
+	Filename [256]byte
+}
+
+type connectEvent struct {
+	Pid     uint32
+	Uid     uint32
+	Comm    [16]byte
+	DstAddr uint32
+	DstPort uint16
+}
+
+// probeConfig ek object file, uske program/map naam, aur tracepoint ko bundle karta hai
+type probeConfig struct {
+	objPath     string
+	progName    string
+	mapName     string
+	tpCategory  string
+	tpName      string
+	eventLabel  string
+}
+
 func main() {
-	// Purane kernels ke liye memlock limit hatao (kernel 7.0 mein zaroori nahi, but safe practice hai)
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatal("removing memlock limit:", err)
 	}
 
-	// Compiled eBPF object file load karo
-	spec, err := ebpf.LoadCollectionSpec("bpf/execve.bpf.o")
-	if err != nil {
-		log.Fatalf("loading collection spec: %v", err)
+	probes := []probeConfig{
+		{"bpf/execve.bpf.o", "handle_execve", "rb", "syscalls", "sys_enter_execve", "EXEC"},
+		{"bpf/openat.bpf.o", "handle_openat", "rb_open", "syscalls", "sys_enter_openat", "OPEN"},
+		{"bpf/connect.bpf.o", "handle_connect", "rb_connect", "syscalls", "sys_enter_connect", "CONNECT"},
 	}
 
-	coll, err := ebpf.NewCollection(spec)
-	if err != nil {
-		log.Fatalf("loading BPF collection into kernel: %v", err)
-	}
-	defer coll.Close()
-
-	prog := coll.Programs["handle_execve"]
-	if prog == nil {
-		log.Fatal("program 'handle_execve' not found in collection")
-	}
-
-	rbMap := coll.Maps["rb"]
-	if rbMap == nil {
-		log.Fatal("map 'rb' not found in collection")
-	}
-
-	// Program ko tracepoint pe attach karo — ab kernel actually events bhejna shuru karega
-	tp, err := link.Tracepoint("syscalls", "sys_enter_execve", prog, nil)
-	if err != nil {
-		log.Fatalf("attaching tracepoint: %v", err)
-	}
-	defer tp.Close()
-
-	// Ring buffer reader banao
-	rd, err := ringbuf.NewReader(rbMap)
-	if err != nil {
-		log.Fatalf("opening ringbuf reader: %v", err)
-	}
-	defer rd.Close()
-
-	// Ctrl+C pe gracefully close karne ke liye
+	var wg sync.WaitGroup
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt)
-	go func() {
-		<-stopper
-		rd.Close()
-	}()
 
-	fmt.Println("WatchBPF Phase 1 — watching execve() syscalls. Press Ctrl+C to stop.")
-	fmt.Println("PID\tUID\tCOMM\t\tFILENAME")
+	fmt.Println("WatchBPF Phase 2 — watching execve / openat / connect. Press Ctrl+C to stop.")
+	fmt.Println("TYPE\t\tPID\tUID\tCOMM\t\tDETAIL")
 
-	var ev event
+	for _, p := range probes {
+		spec, err := ebpf.LoadCollectionSpec(p.objPath)
+		if err != nil {
+			log.Fatalf("[%s] loading spec: %v", p.eventLabel, err)
+		}
+
+		coll, err := ebpf.NewCollection(spec)
+		if err != nil {
+			log.Fatalf("[%s] loading collection into kernel: %v", p.eventLabel, err)
+		}
+		defer coll.Close()
+
+		prog := coll.Programs[p.progName]
+		if prog == nil {
+			log.Fatalf("[%s] program %q not found", p.eventLabel, p.progName)
+		}
+
+		m := coll.Maps[p.mapName]
+		if m == nil {
+			log.Fatalf("[%s] map %q not found", p.eventLabel, p.mapName)
+		}
+
+		tp, err := link.Tracepoint(p.tpCategory, p.tpName, prog, nil)
+		if err != nil {
+			log.Fatalf("[%s] attaching tracepoint: %v", p.eventLabel, err)
+		}
+		defer tp.Close()
+
+		rd, err := ringbuf.NewReader(m)
+		if err != nil {
+			log.Fatalf("[%s] opening ringbuf reader: %v", p.eventLabel, err)
+		}
+		defer rd.Close()
+
+		go func() {
+			<-stopper
+			rd.Close()
+		}()
+
+		wg.Add(1)
+		label := p.eventLabel
+		go func() {
+			defer wg.Done()
+			readLoop(label, rd)
+		}()
+	}
+
+	wg.Wait()
+	fmt.Println("\nAll readers stopped. Exiting.")
+}
+
+func readLoop(label string, rd *ringbuf.Reader) {
 	for {
 		record, err := rd.Read()
 		if err != nil {
 			if errors.Is(err, ringbuf.ErrClosed) {
-				fmt.Println("\nReceived signal, exiting...")
 				return
 			}
-			log.Printf("reading from ringbuf: %v", err)
+			log.Printf("[%s] reading ringbuf: %v", label, err)
 			continue
 		}
 
-		if err := binary.Read(bytes.NewBuffer(record.RawSample), binary.LittleEndian, &ev); err != nil {
-			log.Printf("parsing ringbuf event: %v", err)
-			continue
-		}
+		buf := bytes.NewBuffer(record.RawSample)
 
-		comm := unixCString(ev.Comm[:])
-		filename := unixCString(ev.Filename[:])
-		fmt.Printf("%d\t%d\t%s\t\t%s\n", ev.Pid, ev.Uid, comm, filename)
+		switch label {
+		case "EXEC":
+			var ev execEvent
+			if err := binary.Read(buf, binary.LittleEndian, &ev); err != nil {
+				continue
+			}
+			fmt.Printf("%s\t\t%d\t%d\t%s\t\t%s\n", label, ev.Pid, ev.Uid, cstr(ev.Comm[:]), cstr(ev.Filename[:]))
+
+		case "OPEN":
+			var ev openEvent
+			if err := binary.Read(buf, binary.LittleEndian, &ev); err != nil {
+				continue
+			}
+			fmt.Printf("%s\t\t%d\t%d\t%s\t\t%s\n", label, ev.Pid, ev.Uid, cstr(ev.Comm[:]), cstr(ev.Filename[:]))
+
+		case "CONNECT":
+			var ev connectEvent
+			if err := binary.Read(buf, binary.LittleEndian, &ev); err != nil {
+				continue
+			}
+			ip := make(net.IP, 4)
+			binary.LittleEndian.PutUint32(ip, ev.DstAddr)
+			fmt.Printf("%s\t%d\t%d\t%s\t\t%s:%d\n", label, ev.Pid, ev.Uid, cstr(ev.Comm[:]), ip.String(), ev.DstPort)
+		}
 	}
 }
 
-// unixCString null-terminated byte array ko Go string mein convert karta hai
-func unixCString(b []byte) string {
+func cstr(b []byte) string {
 	idx := bytes.IndexByte(b, 0)
 	if idx == -1 {
 		idx = len(b)
