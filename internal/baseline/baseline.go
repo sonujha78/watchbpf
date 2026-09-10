@@ -3,8 +3,17 @@ package baseline
 import (
 	"encoding/json"
 	"os"
+	"regexp"
 	"sync"
 )
+
+var numericPattern = regexp.MustCompile(`\b\d+\b`)
+
+// normalize numeric tokens (PIDs, ports, timestamps) ko <NUM> se replace karta hai,
+// taaki /proc/90194/stat aur /proc/90195/stat ek hi baseline pattern maane jaayein
+func normalize(s string) string {
+	return numericPattern.ReplaceAllString(s, "<NUM>")
+}
 
 // Store ek thread-safe, disk-persisted allowlist hai.
 // Key format: "<eventType>|<comm>|<path>" — e.g. "EXEC|ls|/bin/ls"
@@ -24,7 +33,7 @@ func NewStore(filePath string) *Store {
 }
 
 func makeKey(eventType, comm, path string) string {
-	return eventType + "|" + comm + "|" + path
+	return eventType + "|" + comm + "|" + normalize(path)
 }
 
 // IsKnown check karta hai ki ye combination pehle dekha gaya hai ya nahi
