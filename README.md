@@ -2,11 +2,11 @@
 
 **Real-time Linux kernel threat detection & automated remediation, powered by eBPF + LLM reasoning.**
 
-WatchBPF traces critical syscalls at the kernel level using eBPF/CO-RE, filters out normal behavior with a self-learning baseline, and sends only genuinely novel or suspicious activity to an LLM (your own free Gemini API key, or a local Ollama model) for contextual threat scoring. Based on that score, a tiered policy engine can alert, isolate, or terminate the offending process — with safety-first defaults throughout.
+WatchBPF traces critical syscalls at the kernel level using eBPF/CO-RE, filters out normal behavior with a self-learning baseline, and sends only genuinely novel or suspicious activity to an LLM (your own free Gemini API key, or a local Ollama model) for contextual threat scoring. Based on that score, a tiered policy engine can alert, pause, or terminate the offending process — with safety-first defaults throughout.
 
 Single static binary. No vendor lock-in. Bring your own key, or run fully offline.
 
-> **Status:** Core engine (kernel tracing → baseline filter → AI scoring → policy-based enforcement) complete and tested. Packaging for public release in progress.
+> **Status:** Core engine (kernel tracing → baseline filter → AI scoring → policy-based enforcement) complete and tested. Packaging in progress.
 
 ---
 
@@ -21,39 +21,32 @@ Most open eBPF security tools stop at detection: they fire an alert and leave tr
 | Autonomous remediation | ❌ Alerts only | ✅ Policy-based | ✅ LLM-informed + policy-based |
 | Free, zero mandatory API cost | ✅ | ✅ | ✅ (BYOK, or fully offline via Ollama) |
 | Single static binary | ❌ | ❌ | ✅ |
-| Beginner-friendly install | ❌ | ❌ | ✅ One-command install |
+| Beginner-friendly install | ❌ | ❌ | ✅ One-command install script |
 
 WatchBPF isn't claiming to be the first eBPF security tool — it combines AI-driven reasoning with real enforcement in a package anyone can install and run for free.
 
 ---
 
 ## How It Works
+Kernel syscalls (execve, openat, connect)
+│ eBPF/CO-RE probes, near-zero overhead
+▼
+Baseline filter ──── learns normal behavior, drops known-good events
+│ only novel/ambiguous events pass through
+▼
+AI diagnosis engine ──── Gemini (BYOK) or local Ollama
+│ returns: threat_score, MITRE tactic, confidence, rationale
+▼
+Policy engine ──── tiered thresholds, dry-run by default,
+│ protected-process guardrail, rate-limiting
+▼
+Enforcement ──── log / alert / SIGSTOP (pause) / SIGKILL / nftables isolation
 
-```
-Kernel syscalls (execve, openat, connect, ...)
-        │  eBPF/CO-RE probes, near-zero overhead
-        ▼
-Baseline filter  ──── learns normal behavior, drops known-good events
-        │  only novel/ambiguous events pass through
-        ▼
-AI diagnosis engine  ──── Gemini (BYOK) or local Ollama
-        │  returns: threat_score, MITRE tactic, confidence, rationale
-        ▼
-Policy engine  ──── tiered thresholds, dry-run by default
-        │
-        ▼
-Enforcement  ──── alert / cgroup freeze / SIGKILL / nftables isolation
-        │
-        ▼
-Immutable, hash-chained audit log
-```
-
-1. **eBPF probes** trace `execve`, `openat`, and `connect` (and more) at the kernel level with near-zero overhead.
-2. A **baseline/allowlist filter** learns normal system behavior during an initial learning window, so only genuinely novel events get escalated — this is what keeps LLM usage (and cost) low.
-3. Escalated events are packaged into a compact "event story" and sent to an **LLM** — your own Gemini API key, or a local Ollama model as a free, fully offline fallback — which returns a structured threat score, MITRE ATT&CK tactic, and recommended action.
-4. A **policy engine** applies tiered, configurable thresholds with safety guardrails: dry-run mode by default, a protected-process list, and rate-limited actions to prevent runaway responses.
-5. When enabled, the **enforcement module** can freeze, kill, or isolate malicious processes via cgroups and nftables.
-6. Every decision is written to an **append-only, hash-chained audit log** for forensics and review.
+1. **eBPF probes** trace `execve` (with arguments), `openat`, and `connect` at the kernel level with near-zero overhead.
+2. A **baseline/allowlist filter** learns normal system behavior during an initial learning window, normalizing numeric tokens (PIDs, etc.) so dynamic-but-benign patterns don't cause noise. Only genuinely novel events get escalated — this is what keeps LLM usage low.
+3. Escalated events are packaged into a compact "event story" and sent to an **LLM** — your own Gemini API key, or a local Ollama model as a free, fully offline fallback — which returns a structured threat score, MITRE ATT&CK tactic, and recommended action. LLM calls run asynchronously and are concurrency-limited so a slow response never blocks event capture.
+4. A **policy engine** applies tiered, threshold-based decisions with safety guardrails: dry-run mode by default, a protected-process list, and a rate limit on escalations per minute to prevent LLM overload or action storms.
+5. When enabled (`-enforce=live`), the **enforcement module** can pause (SIGSTOP) or kill (SIGKILL) processes and isolate suspicious IPs via nftables.
 
 ---
 
@@ -86,6 +79,7 @@ WatchBPF starts in **dry-run mode**: it observes and logs what it *would* do, wi
 WatchBPF works out of the box via a local Ollama model — no cost, fully offline. To use Gemini's free tier instead:
 
 ```bash
+sudo mkdir -p /etc/watchbpf
 sudo nano /etc/watchbpf/gemini.key
 # paste your free Gemini API key from https://aistudio.google.com/app/apikey
 sudo chmod 600 /etc/watchbpf/gemini.key
@@ -108,49 +102,50 @@ sudo systemctl restart watchbpf
 WatchBPF can terminate processes and firewall IPs — that capability is treated as non-negotiable to guard carefully:
 
 - **Dry-run by default** — no destructive action until you explicitly enable live enforcement.
-- **Protected-process list** — critical system processes (`sshd`, `systemd`, `kubelet`, containerd, WatchBPF itself, etc.) can never be hard-killed.
-- **Rate-limited actions** — caps kills/isolations per minute, so a single bad LLM response can't cascade into taking down the whole box.
-- **Strict output validation** — the LLM's recommended action is checked against a fixed enum server-side; malformed or off-schema responses are always treated as log-only, never acted on.
-- **Prompt-injection resistant** — process names/args are attacker-controlled input; they're sanitized and the model is explicitly instructed to treat them as data, not instructions.
-- **Fail-safe on API failure** — if Gemini/Ollama is unreachable, WatchBPF falls back to local rule-based heuristics rather than failing open or silently.
-- **Kill-switch** — a single config flag/env var disables all auto-action instantly.
+- **Protected-process list** — critical system processes (`sshd`, `systemd`, `kubelet`, containerd, WatchBPF itself, etc.) are downgraded to alert-only, never hard-killed.
+- **Rate-limited escalations** — caps how many events per minute get sent to the LLM at all, so a burst of activity can't overload the AI backend or trigger an action storm.
+- **Strict output validation** — the LLM's threat score and recommended action are checked against fixed bounds/enum server-side; malformed or off-schema responses are always treated as log-only, never acted on.
+- **Self-feedback-loop guard** — WatchBPF's own process and its LLM backend's traffic are excluded from analysis, so it never analyzes itself.
+- **Fail-safe on API failure** — if Gemini/Ollama is unreachable or times out, the event is logged and skipped rather than blocking or failing open.
 
 ---
 
-## Configuration
+## Response Tiers
 
-All thresholds, allowlists, and the enforcement mode live in a hot-reloadable YAML config (`/etc/watchbpf/config.yaml`). Default response tiers:
+The policy engine maps LLM threat scores to response tiers:
 
-| Threat Score | Action |
-|---|---|
-| 0–39 | Log only |
-| 40–69 | Alert (webhook/Slack) + flag for review |
-| 70–89 | Soft action — cgroup freeze / rate-limit the process |
-| 90–100 | Hard action — SIGKILL + nftables IP quarantine |
+| Threat Score | Tier | Action (when `-enforce=live`) |
+|---|---|---|
+| 0–39 | Log | Logged only |
+| 40–69 | Alert | Logged, flagged as alert |
+| 70–89 | Soft action | Process paused (SIGSTOP) |
+| 90–100 | Hard action | Process killed (SIGKILL) + IP isolated (nftables) |
 
-All thresholds are overridable in config.
+Protected processes and rate-limited events are automatically downgraded to Alert regardless of score.
 
 ---
 
-## Architecture
+## Known Limitations
 
-See [docs/architecture.md](docs/architecture.md) *(coming soon)* for the full data-flow diagram and component breakdown.
-
-## Observability
-
-WatchBPF exposes a Prometheus `/metrics` endpoint (events/sec, LLM latency, action counts) with an included Grafana dashboard JSON.
+- Local Ollama models are noticeably slower than Gemini's API and can fall behind under bursty event volume — the rate-limiting guardrail exists specifically to handle this gracefully.
+- Configuration is currently via CLI flags only (`-mode`, `-enforce`, `-state`); a YAML config file is planned but not yet implemented.
+- No persistent audit log yet — output currently goes to stdout/journald only.
+- IPv6 `connect` events are not yet captured (IPv4 only).
 
 ## Roadmap
 
 - [ ] Docker image
-- [ ] Helm chart / K8s DaemonSet polish
+- [ ] Persistent, tamper-evident audit log
+- [ ] YAML-based configuration
+- [ ] Helm chart / K8s DaemonSet
 - [ ] arm64 support
+- [ ] Prometheus metrics endpoint
 - [ ] Public launch
 
 ## License
 
 Apache License 2.0
 
-## Contributing
+## Author
 
-Contributions welcome — see `CONTRIBUTING.md` *(coming soon)*. Issues and PRs will be open once the repo goes public.
+Built and maintained by [@sonujha78](https://github.com/sonujha78).
