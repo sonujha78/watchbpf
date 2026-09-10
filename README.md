@@ -92,6 +92,28 @@ sudo systemctl restart watchbpf
 
 ---
 
+## Run with Docker
+
+A Docker image is available for containerized deployments. Because WatchBPF traces kernel syscalls, the container needs elevated privileges:
+
+```bash
+docker build -t watchbpf:latest .
+
+docker run --rm \
+  --privileged \
+  --pid=host \
+  -v /sys/kernel/debug:/sys/kernel/debug:rw \
+  -v /sys/kernel/btf:/sys/kernel/btf:ro \
+  -v /etc/watchbpf:/etc/watchbpf \
+  watchbpf:latest
+```
+
+- `--privileged` and `--pid=host` are required for eBPF to trace host processes from inside the container.
+- Mount `/etc/watchbpf` to persist your baseline and Gemini key across container restarts.
+- The container's kernel dependency is the **host kernel** (5.15+, BTF-enabled) — containers don't carry their own kernel.
+
+---
+
 ## Safety Guardrails
 
 WatchBPF can terminate processes and firewall IPs — that capability is treated as non-negotiable to guard carefully:
@@ -129,7 +151,6 @@ Protected processes and rate-limited events are automatically downgraded to Aler
 
 ## Roadmap
 
-- [ ] Docker image
 - [ ] Persistent, tamper-evident audit log
 - [ ] YAML-based configuration
 - [ ] Helm chart / K8s DaemonSet
