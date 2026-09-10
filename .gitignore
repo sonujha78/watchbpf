@@ -1,0 +1,6 @@
+.env
+config.local.yaml
+*.key
+bin/
+*.o
+*.tmp
