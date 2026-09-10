@@ -22,6 +22,8 @@ import (
 	"github.com/sonujha78/watchbpf/internal/baseline"
 	"github.com/sonujha78/watchbpf/internal/llm"
 	"github.com/sonujha78/watchbpf/internal/policy"
+	"github.com/sonujha78/watchbpf/internal/enforce"
+	"strings"
 )
 
 type execEvent struct {
@@ -264,6 +266,40 @@ func handleEvent(eventType, comm, detail string, pid, uid uint32) {
 
 	decision := policyEngine.Evaluate(comm, assessment.ThreatScore)
 	fmt.Printf("[DECISION]\ttier=%s\treason=%q\n", decision.Tier, decision.Reason)
+
+	// Sirf tab actual action lo jab decision truly hard/soft ho (dry-run reason string check karke)
+	isDryRun := strings.HasPrefix(decision.Reason, "DRY-RUN")
+
+	switch decision.Tier {
+	case policy.TierHard:
+		if isDryRun {
+			fmt.Printf("[ACTION]\twould KILL pid=%d (comm=%s) — dry-run, no action taken\n", pid, comm)
+		} else {
+			if err := enforce.KillProcess(pid); err != nil {
+				log.Printf("[ACTION-ERROR] kill failed: %v", err)
+			} else {
+				fmt.Printf("[ACTION]\tKILLED pid=%d (comm=%s)\n", pid, comm)
+			}
+			if eventType == "CONNECT" {
+				ip := strings.Split(detail, ":")[0]
+				if err := enforce.IsolateIP(ip); err != nil {
+					log.Printf("[ACTION-ERROR] isolate failed: %v", err)
+				} else {
+					fmt.Printf("[ACTION]\tISOLATED ip=%s\n", ip)
+				}
+			}
+		}
+	case policy.TierSoft:
+		if isDryRun {
+			fmt.Printf("[ACTION]\twould PAUSE pid=%d (comm=%s) — dry-run, no action taken\n", pid, comm)
+		} else {
+			if err := enforce.PauseProcess(pid); err != nil {
+				log.Printf("[ACTION-ERROR] pause failed: %v", err)
+			} else {
+				fmt.Printf("[ACTION]\tPAUSED pid=%d (comm=%s)\n", pid, comm)
+			}
+		}
+	}
 }
 
 func cstr(b []byte) string {
