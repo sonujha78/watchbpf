@@ -28,19 +28,14 @@ WatchBPF isn't claiming to be the first eBPF security tool — it combines AI-dr
 ---
 
 ## How It Works
-Kernel syscalls (execve, openat, connect)
-│ eBPF/CO-RE probes, near-zero overhead
-▼
-Baseline filter ──── learns normal behavior, drops known-good events
-│ only novel/ambiguous events pass through
-▼
-AI diagnosis engine ──── Gemini (BYOK) or local Ollama
-│ returns: threat_score, MITRE tactic, confidence, rationale
-▼
-Policy engine ──── tiered thresholds, dry-run by default,
-│ protected-process guardrail, rate-limiting
-▼
-Enforcement ──── log / alert / SIGSTOP (pause) / SIGKILL / nftables isolation
+
+```mermaid
+flowchart TD
+    A[Kernel syscalls: execve, openat, connect] -->|eBPF/CO-RE probes, near-zero overhead| B[Baseline filter: learns normal behavior]
+    B -->|only novel/ambiguous events pass| C[AI diagnosis engine: Gemini or Ollama]
+    C -->|threat_score, MITRE tactic, rationale| D[Policy engine: tiered thresholds, dry-run default]
+    D --> E[Enforcement: log / alert / pause / kill / isolate]
+```
 
 1. **eBPF probes** trace `execve` (with arguments), `openat`, and `connect` at the kernel level with near-zero overhead.
 2. A **baseline/allowlist filter** learns normal system behavior during an initial learning window, normalizing numeric tokens (PIDs, etc.) so dynamic-but-benign patterns don't cause noise. Only genuinely novel events get escalated — this is what keeps LLM usage low.
