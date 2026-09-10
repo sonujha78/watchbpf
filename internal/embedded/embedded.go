@@ -10,3 +10,6 @@ var OpenatObj []byte
 
 //go:embed connect.bpf.o
 var ConnectObj []byte
+
+//go:embed prompt_v1.txt
+var PromptV1 string

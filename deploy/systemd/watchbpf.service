@@ -1,0 +1,27 @@
+[Unit]
+Description=WatchBPF - eBPF + LLM Kernel Threat Guard
+Documentation=https://github.com/sonujha78/watchbpf
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/watchbpf-agent -mode=filter -state=/etc/watchbpf/baseline.json -enforce=dry-run
+Restart=on-failure
+RestartSec=5
+User=root
+
+# Safety: dry-run default hai config mein bhi, systemd override yahan nahi karta —
+# user ko explicitly service file edit karke -enforce=live karna hoga jab ready ho
+
+# Security hardening (jitna possible ho, eBPF+kill-capability ke saath)
+NoNewPrivileges=false
+ProtectSystem=false
+ProtectHome=read-only
+
+# Logs journald mein jaayenge, `journalctl -u watchbpf` se dekh sakte ho
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

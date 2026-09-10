@@ -89,11 +89,7 @@ func main() {
 
 	// LLM client select karo — Gemini pehle try karo (agar key hai), warna Ollama
 	if *mode == "filter" {
-		promptBytes, err := os.ReadFile(*promptPath)
-		if err != nil {
-			log.Fatalf("reading prompt template: %v", err)
-		}
-		promptTemplate := string(promptBytes)
+		promptTemplate := embedded.PromptV1
 
 		if gc := llm.NewGeminiClient(promptTemplate); gc != nil {
 			llmClient = gc
