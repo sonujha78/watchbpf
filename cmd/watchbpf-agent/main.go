@@ -4,17 +4,21 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
 	"os/signal"
 	"sync"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/cilium/ebpf/rlimit"
+
+	"github.com/sonujha78/watchbpf/internal/baseline"
 )
 
 type execEvent struct {
@@ -39,17 +43,31 @@ type connectEvent struct {
 	DstPort uint16
 }
 
-// probeConfig ek object file, uske program/map naam, aur tracepoint ko bundle karta hai
 type probeConfig struct {
-	objPath     string
-	progName    string
-	mapName     string
-	tpCategory  string
-	tpName      string
-	eventLabel  string
+	objPath    string
+	progName   string
+	mapName    string
+	tpCategory string
+	tpName     string
+	eventLabel string
 }
 
+var (
+	mode      = flag.String("mode", "learn", "learn | filter")
+	statePath = flag.String("state", "baseline.json", "path to baseline allowlist file")
+	store     *baseline.Store
+)
+
 func main() {
+	flag.Parse()
+
+	if *mode != "learn" && *mode != "filter" {
+		log.Fatalf("invalid -mode %q: must be 'learn' or 'filter'", *mode)
+	}
+
+	store = baseline.NewStore(*statePath)
+	log.Printf("Baseline store loaded: %d known entries (mode=%s)", store.Count(), *mode)
+
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatal("removing memlock limit:", err)
 	}
@@ -64,8 +82,25 @@ func main() {
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt)
 
-	fmt.Println("WatchBPF Phase 2 — watching execve / openat / connect. Press Ctrl+C to stop.")
-	fmt.Println("TYPE\t\tPID\tUID\tCOMM\t\tDETAIL")
+	// Har 30 second mein allowlist disk pe save karo (learning mode ke liye)
+	saveTicker := time.NewTicker(30 * time.Second)
+	go func() {
+		for {
+			select {
+			case <-saveTicker.C:
+				if err := store.Save(); err != nil {
+					log.Printf("error saving baseline: %v", err)
+				}
+			case <-stopper:
+				saveTicker.Stop()
+				store.Save()
+				return
+			}
+		}
+	}()
+
+	fmt.Printf("WatchBPF Phase 2 — mode=%s. Press Ctrl+C to stop.\n", *mode)
+	fmt.Println("TAG\t\tTYPE\t\tPID\tUID\tCOMM\t\tDETAIL")
 
 	for _, p := range probes {
 		spec, err := ebpf.LoadCollectionSpec(p.objPath)
@@ -75,18 +110,14 @@ func main() {
 
 		coll, err := ebpf.NewCollection(spec)
 		if err != nil {
-			log.Fatalf("[%s] loading collection into kernel: %v", p.eventLabel, err)
+			log.Fatalf("[%s] loading collection: %v", p.eventLabel, err)
 		}
 		defer coll.Close()
 
 		prog := coll.Programs[p.progName]
-		if prog == nil {
-			log.Fatalf("[%s] program %q not found", p.eventLabel, p.progName)
-		}
-
 		m := coll.Maps[p.mapName]
-		if m == nil {
-			log.Fatalf("[%s] map %q not found", p.eventLabel, p.mapName)
+		if prog == nil || m == nil {
+			log.Fatalf("[%s] program or map missing", p.eventLabel)
 		}
 
 		tp, err := link.Tracepoint(p.tpCategory, p.tpName, prog, nil)
@@ -131,20 +162,24 @@ func readLoop(label string, rd *ringbuf.Reader) {
 
 		buf := bytes.NewBuffer(record.RawSample)
 
+		var comm, detail string
+
 		switch label {
 		case "EXEC":
 			var ev execEvent
 			if err := binary.Read(buf, binary.LittleEndian, &ev); err != nil {
 				continue
 			}
-			fmt.Printf("%s\t\t%d\t%d\t%s\t\t%s\n", label, ev.Pid, ev.Uid, cstr(ev.Comm[:]), cstr(ev.Filename[:]))
+			comm = cstr(ev.Comm[:])
+			detail = cstr(ev.Filename[:])
 
 		case "OPEN":
 			var ev openEvent
 			if err := binary.Read(buf, binary.LittleEndian, &ev); err != nil {
 				continue
 			}
-			fmt.Printf("%s\t\t%d\t%d\t%s\t\t%s\n", label, ev.Pid, ev.Uid, cstr(ev.Comm[:]), cstr(ev.Filename[:]))
+			comm = cstr(ev.Comm[:])
+			detail = cstr(ev.Filename[:])
 
 		case "CONNECT":
 			var ev connectEvent
@@ -153,9 +188,31 @@ func readLoop(label string, rd *ringbuf.Reader) {
 			}
 			ip := make(net.IP, 4)
 			binary.LittleEndian.PutUint32(ip, ev.DstAddr)
-			fmt.Printf("%s\t%d\t%d\t%s\t\t%s:%d\n", label, ev.Pid, ev.Uid, cstr(ev.Comm[:]), ip.String(), ev.DstPort)
+			comm = cstr(ev.Comm[:])
+			detail = fmt.Sprintf("%s:%d", ip.String(), ev.DstPort)
 		}
+
+		handleEvent(label, comm, detail)
 	}
+}
+
+// handleEvent baseline filter logic apply karta hai
+func handleEvent(eventType, comm, detail string) {
+	known := store.IsKnown(eventType, comm, detail)
+
+	if *mode == "learn" {
+		if !known {
+			store.Learn(eventType, comm, detail)
+			fmt.Printf("[LEARNED]\t%s\t\t%s\t\t%s\n", eventType, comm, detail)
+		}
+		return
+	}
+
+	// mode == "filter"
+	if known {
+		return // baseline mein hai — silently allow, print mat karo
+	}
+	fmt.Printf("[ESCALATE]\t%s\t\t%s\t\t%s\n", eventType, comm, detail)
 }
 
 func cstr(b []byte) string {
