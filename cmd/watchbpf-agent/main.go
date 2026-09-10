@@ -21,6 +21,7 @@ import (
 
 	"github.com/sonujha78/watchbpf/internal/baseline"
 	"github.com/sonujha78/watchbpf/internal/llm"
+	"github.com/sonujha78/watchbpf/internal/policy"
 )
 
 type execEvent struct {
@@ -64,6 +65,8 @@ var (
 	promptPath = flag.String("prompt", "prompts/v1.txt", "path to LLM prompt template")
 	store      *baseline.Store
 	llmClient  llm.Client
+	policyEngine *policy.Engine
+	enforceMode  = flag.String("enforce", "dry-run", "dry-run | live")
 )
 
 func main() {
@@ -93,6 +96,9 @@ func main() {
 			log.Printf("LLM backend: %s (no Gemini key found, using local fallback)", oc.Name())
 		}
 	}
+
+	policyEngine = policy.NewEngine(*enforceMode)
+	log.Printf("Policy engine initialized (enforce=%s)", *enforceMode)
 
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatal("removing memlock limit:", err)
@@ -255,6 +261,9 @@ func handleEvent(eventType, comm, detail string, pid, uid uint32) {
 
 	fmt.Printf("[AI-VERDICT]\tscore=%d\tlabel=%s\ttactic=%s\taction=%s\treason=%q\n",
 		assessment.ThreatScore, assessment.Label, assessment.MitreTactic, assessment.Action, assessment.Rationale)
+
+	decision := policyEngine.Evaluate(comm, assessment.ThreatScore)
+	fmt.Printf("[DECISION]\ttier=%s\treason=%q\n", decision.Tier, decision.Reason)
 }
 
 func cstr(b []byte) string {
