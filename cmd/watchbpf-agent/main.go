@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"flag"
@@ -19,6 +20,7 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 
 	"github.com/sonujha78/watchbpf/internal/baseline"
+	"github.com/sonujha78/watchbpf/internal/llm"
 )
 
 type execEvent struct {
@@ -27,14 +29,12 @@ type execEvent struct {
 	Comm     [16]byte
 	Filename [256]byte
 }
-
 type openEvent struct {
 	Pid      uint32
 	Uid      uint32
 	Comm     [16]byte
 	Filename [256]byte
 }
-
 type connectEvent struct {
 	Pid     uint32
 	Uid     uint32
@@ -53,9 +53,17 @@ type probeConfig struct {
 }
 
 var (
-	mode      = flag.String("mode", "learn", "learn | filter")
-	statePath = flag.String("state", "baseline.json", "path to baseline allowlist file")
-	store     *baseline.Store
+	selfPID    = uint32(os.Getpid())
+	excludedComms = map[string]bool{
+		"ollama":       true,
+		"llama-server": true,
+		"watchbpf-agent": true,
+	}
+	mode       = flag.String("mode", "learn", "learn | filter")
+	statePath  = flag.String("state", "baseline.json", "path to baseline allowlist file")
+	promptPath = flag.String("prompt", "prompts/v1.txt", "path to LLM prompt template")
+	store      *baseline.Store
+	llmClient  llm.Client
 )
 
 func main() {
@@ -67,6 +75,24 @@ func main() {
 
 	store = baseline.NewStore(*statePath)
 	log.Printf("Baseline store loaded: %d known entries (mode=%s)", store.Count(), *mode)
+
+	// LLM client select karo — Gemini pehle try karo (agar key hai), warna Ollama
+	if *mode == "filter" {
+		promptBytes, err := os.ReadFile(*promptPath)
+		if err != nil {
+			log.Fatalf("reading prompt template: %v", err)
+		}
+		promptTemplate := string(promptBytes)
+
+		if gc := llm.NewGeminiClient(promptTemplate); gc != nil {
+			llmClient = gc
+			log.Printf("LLM backend: %s (BYOK key detected)", gc.Name())
+		} else {
+			oc := llm.NewOllamaClient(promptTemplate)
+			llmClient = oc
+			log.Printf("LLM backend: %s (no Gemini key found, using local fallback)", oc.Name())
+		}
+	}
 
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatal("removing memlock limit:", err)
@@ -82,15 +108,12 @@ func main() {
 	stopper := make(chan os.Signal, 1)
 	signal.Notify(stopper, os.Interrupt)
 
-	// Har 30 second mein allowlist disk pe save karo (learning mode ke liye)
 	saveTicker := time.NewTicker(30 * time.Second)
 	go func() {
 		for {
 			select {
 			case <-saveTicker.C:
-				if err := store.Save(); err != nil {
-					log.Printf("error saving baseline: %v", err)
-				}
+				store.Save()
 			case <-stopper:
 				saveTicker.Stop()
 				store.Save()
@@ -99,7 +122,7 @@ func main() {
 		}
 	}()
 
-	fmt.Printf("WatchBPF Phase 2 — mode=%s. Press Ctrl+C to stop.\n", *mode)
+	fmt.Printf("WatchBPF Phase 3 — mode=%s. Press Ctrl+C to stop.\n", *mode)
 	fmt.Println("TAG\t\tTYPE\t\tPID\tUID\tCOMM\t\tDETAIL")
 
 	for _, p := range probes {
@@ -107,7 +130,6 @@ func main() {
 		if err != nil {
 			log.Fatalf("[%s] loading spec: %v", p.eventLabel, err)
 		}
-
 		coll, err := ebpf.NewCollection(spec)
 		if err != nil {
 			log.Fatalf("[%s] loading collection: %v", p.eventLabel, err)
@@ -161,8 +183,8 @@ func readLoop(label string, rd *ringbuf.Reader) {
 		}
 
 		buf := bytes.NewBuffer(record.RawSample)
-
 		var comm, detail string
+		var pid, uid uint32
 
 		switch label {
 		case "EXEC":
@@ -170,16 +192,14 @@ func readLoop(label string, rd *ringbuf.Reader) {
 			if err := binary.Read(buf, binary.LittleEndian, &ev); err != nil {
 				continue
 			}
-			comm = cstr(ev.Comm[:])
-			detail = cstr(ev.Filename[:])
+			comm, detail, pid, uid = cstr(ev.Comm[:]), cstr(ev.Filename[:]), ev.Pid, ev.Uid
 
 		case "OPEN":
 			var ev openEvent
 			if err := binary.Read(buf, binary.LittleEndian, &ev); err != nil {
 				continue
 			}
-			comm = cstr(ev.Comm[:])
-			detail = cstr(ev.Filename[:])
+			comm, detail, pid, uid = cstr(ev.Comm[:]), cstr(ev.Filename[:]), ev.Pid, ev.Uid
 
 		case "CONNECT":
 			var ev connectEvent
@@ -188,16 +208,20 @@ func readLoop(label string, rd *ringbuf.Reader) {
 			}
 			ip := make(net.IP, 4)
 			binary.LittleEndian.PutUint32(ip, ev.DstAddr)
-			comm = cstr(ev.Comm[:])
-			detail = fmt.Sprintf("%s:%d", ip.String(), ev.DstPort)
+			comm, detail, pid, uid = cstr(ev.Comm[:]), fmt.Sprintf("%s:%d", ip.String(), ev.DstPort), ev.Pid, ev.Uid
 		}
 
-		handleEvent(label, comm, detail)
+		handleEvent(label, comm, detail, pid, uid)
 	}
 }
 
-// handleEvent baseline filter logic apply karta hai
-func handleEvent(eventType, comm, detail string) {
+func handleEvent(eventType, comm, detail string, pid, uid uint32) {
+	// Self-feedback-loop guard: apna khud ka process aur Ollama/llama-server
+	// ke traffic ko kabhi LLM tak escalate mat karo
+	if pid == selfPID || excludedComms[comm] {
+		return
+	}
+
 	known := store.IsKnown(eventType, comm, detail)
 
 	if *mode == "learn" {
@@ -210,9 +234,27 @@ func handleEvent(eventType, comm, detail string) {
 
 	// mode == "filter"
 	if known {
-		return // baseline mein hai — silently allow, print mat karo
+		return
 	}
+
 	fmt.Printf("[ESCALATE]\t%s\t\t%s\t\t%s\n", eventType, comm, detail)
+
+	if llmClient == nil {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	story := llm.EventStory{EventType: eventType, Comm: comm, Detail: detail, PID: pid, UID: uid}
+	assessment, err := llmClient.Assess(ctx, story)
+	if err != nil {
+		log.Printf("[LLM-ERROR] %v — falling back to log-only", err)
+		return
+	}
+
+	fmt.Printf("[AI-VERDICT]\tscore=%d\tlabel=%s\ttactic=%s\taction=%s\treason=%q\n",
+		assessment.ThreatScore, assessment.Label, assessment.MitreTactic, assessment.Action, assessment.Rationale)
 }
 
 func cstr(b []byte) string {
