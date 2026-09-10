@@ -57,6 +57,10 @@ type probeConfig struct {
 }
 
 var (
+	llmSemaphore = make(chan struct{}, 3) // max 3 concurrent LLM calls
+	escalationCount int
+	escalationMu     sync.Mutex
+	escalationWindow = time.Now()
 	selfPID    = uint32(os.Getpid())
 	excludedComms = map[string]bool{
 		"ollama":       true,
@@ -262,6 +266,22 @@ func handleEvent(eventType, comm, detail string, pid, uid uint32) {
 
 	fmt.Printf("[ESCALATE]\t%s\t\t%s\t\t%s\n", eventType, comm, detail)
 
+	// Rate-limit guard: agar 1 minute mein 50 se zyada escalations ho jaayein,
+	// to LLM ko spam karna band kar do (event-storm protection)
+	escalationMu.Lock()
+	if time.Since(escalationWindow) > time.Minute {
+		escalationCount = 0
+		escalationWindow = time.Now()
+	}
+	escalationCount++
+	overLimit := escalationCount > 50
+	escalationMu.Unlock()
+
+	if overLimit {
+		fmt.Printf("[RATE-LIMITED]\tescalation storm detected — skipping LLM call for this event\n")
+		return
+	}
+
 	if llmClient == nil {
 		return
 	}
@@ -269,7 +289,11 @@ func handleEvent(eventType, comm, detail string, pid, uid uint32) {
 	// IMPORTANT: LLM call ko goroutine mein bhejo, taaki ring buffer reader
 	// kabhi block na ho — warna slow LLM response ke dauran naye kernel events
 	// silently drop ho jaate hain (ring buffer full ho jaata hai)
-	go processLLM(eventType, comm, detail, pid, uid)
+	go func() {
+		llmSemaphore <- struct{}{}        // slot lo
+		defer func() { <-llmSemaphore }() // slot chhodo
+		processLLM(eventType, comm, detail, pid, uid)
+	}()
 }
 
 func processLLM(eventType, comm, detail string, pid, uid uint32) {
