@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 )
 
 type GeminiClient struct {
@@ -20,10 +21,18 @@ type GeminiClient struct {
 // caller ko fallback (Ollama) pe switch karna chahiye
 func NewGeminiClient(promptTemplate string) *GeminiClient {
 	key := os.Getenv("WATCHBPF_GEMINI_API_KEY")
+
+	// Fallback: agar env var na mile (jaise sudo ke andar), config file se padho
+	if key == "" {
+		if data, err := os.ReadFile("/etc/watchbpf/gemini.key"); err == nil {
+			key = strings.TrimSpace(string(data))
+		}
+	}
+
 	if key == "" {
 		return nil
 	}
-	return &GeminiClient{apiKey: key, model: "gemini-1.5-flash", prompt: promptTemplate}
+	return &GeminiClient{apiKey: key, model: "gemini-flash-latest", prompt: promptTemplate}
 }
 
 func (c *GeminiClient) Name() string { return "gemini:" + c.model }
