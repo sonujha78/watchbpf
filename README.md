@@ -124,6 +124,7 @@ WatchBPF can terminate processes and firewall IPs — that capability is treated
 - **Strict output validation** — the LLM's threat score and recommended action are checked against fixed bounds/enum server-side; malformed or off-schema responses are always treated as log-only, never acted on.
 - **Self-feedback-loop guard** — WatchBPF's own process and its LLM backend's traffic are excluded from analysis, so it never analyzes itself.
 - **Fail-safe on API failure** — if Gemini/Ollama is unreachable or times out, the event is logged and skipped rather than blocking or failing open.
+- **Tamper-evident audit log** — every decision (including rate-limited ones) is written to `/var/log/watchbpf-audit.log` as a hash-chained JSON record; any tampering breaks the chain and is detectable via verification.
 
 ---
 
@@ -146,12 +147,10 @@ Protected processes and rate-limited events are automatically downgraded to Aler
 
 - Local Ollama models are noticeably slower than Gemini's API and can fall behind under bursty event volume — the rate-limiting guardrail exists specifically to handle this gracefully.
 - Configuration is currently via CLI flags only (`-mode`, `-enforce`, `-state`); a YAML config file is planned but not yet implemented.
-- No persistent audit log yet — output currently goes to stdout/journald only.
 - IPv6 `connect` events are not yet captured (IPv4 only).
 
 ## Roadmap
 
-- [ ] Persistent, tamper-evident audit log
 - [ ] YAML-based configuration
 - [ ] Helm chart / K8s DaemonSet
 - [ ] arm64 support
