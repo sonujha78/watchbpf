@@ -24,6 +24,7 @@ import (
 	"github.com/sonujha78/watchbpf/internal/policy"
 	"github.com/sonujha78/watchbpf/internal/enforce"
 	"github.com/sonujha78/watchbpf/internal/embedded"
+	"github.com/sonujha78/watchbpf/internal/audit"
 	"strings"
 )
 
@@ -58,6 +59,7 @@ type probeConfig struct {
 }
 
 var (
+	auditLogger *audit.Logger
 	llmSemaphore = make(chan struct{}, 3) // max 3 concurrent LLM calls
 	escalationCount int
 	escalationMu     sync.Mutex
@@ -103,6 +105,12 @@ func main() {
 
 	policyEngine = policy.NewEngine(*enforceMode)
 	log.Printf("Policy engine initialized (enforce=%s)", *enforceMode)
+
+	var err2 error
+	auditLogger, err2 = audit.NewLogger("/var/log/watchbpf-audit.log")
+	if err2 != nil {
+		log.Printf("WARNING: audit logger init failed: %v (continuing without audit log)", err2)
+	}
 
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatal("removing memlock limit:", err)
@@ -276,6 +284,9 @@ func handleEvent(eventType, comm, detail string, pid, uid uint32) {
 
 	if overLimit {
 		fmt.Printf("[RATE-LIMITED]\tescalation storm detected — skipping LLM call for this event\n")
+		if auditLogger != nil {
+			auditLogger.Log(eventType, comm, detail, pid, -1, "rate_limited", "escalation storm — LLM call skipped", "")
+		}
 		return
 	}
 
@@ -309,6 +320,12 @@ func processLLM(eventType, comm, detail string, pid, uid uint32) {
 
 	decision := policyEngine.Evaluate(comm, assessment.ThreatScore)
 	fmt.Printf("[DECISION]\ttier=%s\treason=%q\n", decision.Tier, decision.Reason)
+
+	if auditLogger != nil {
+		if err := auditLogger.Log(eventType, comm, detail, pid, assessment.ThreatScore, string(decision.Tier), decision.Reason, ""); err != nil {
+			log.Printf("WARNING: audit log write failed: %v", err)
+		}
+	}
 
 	// Sirf tab actual action lo jab decision truly hard/soft ho (dry-run reason string check karke)
 	isDryRun := strings.HasPrefix(decision.Reason, "DRY-RUN")
