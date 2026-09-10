@@ -23,6 +23,7 @@ import (
 	"github.com/sonujha78/watchbpf/internal/llm"
 	"github.com/sonujha78/watchbpf/internal/policy"
 	"github.com/sonujha78/watchbpf/internal/enforce"
+	"github.com/sonujha78/watchbpf/internal/embedded"
 	"strings"
 )
 
@@ -48,7 +49,7 @@ type connectEvent struct {
 }
 
 type probeConfig struct {
-	objPath    string
+	objBytes   []byte
 	progName   string
 	mapName    string
 	tpCategory string
@@ -112,9 +113,9 @@ func main() {
 	}
 
 	probes := []probeConfig{
-		{"bpf/execve.bpf.o", "handle_execve", "rb", "syscalls", "sys_enter_execve", "EXEC"},
-		{"bpf/openat.bpf.o", "handle_openat", "rb_open", "syscalls", "sys_enter_openat", "OPEN"},
-		{"bpf/connect.bpf.o", "handle_connect", "rb_connect", "syscalls", "sys_enter_connect", "CONNECT"},
+		{embedded.ExecveObj, "handle_execve", "rb", "syscalls", "sys_enter_execve", "EXEC"},
+		{embedded.OpenatObj, "handle_openat", "rb_open", "syscalls", "sys_enter_openat", "OPEN"},
+		{embedded.ConnectObj, "handle_connect", "rb_connect", "syscalls", "sys_enter_connect", "CONNECT"},
 	}
 
 	var wg sync.WaitGroup
@@ -139,7 +140,7 @@ func main() {
 	fmt.Println("TAG\t\tTYPE\t\tPID\tUID\tCOMM\t\tDETAIL")
 
 	for _, p := range probes {
-		spec, err := ebpf.LoadCollectionSpec(p.objPath)
+		spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(p.objBytes))
 		if err != nil {
 			log.Fatalf("[%s] loading spec: %v", p.eventLabel, err)
 		}
