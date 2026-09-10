@@ -1,0 +1,5 @@
+bin/
+baseline.json
+baseline.json.backup
+.git/
+*.log
