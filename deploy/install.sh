@@ -25,6 +25,15 @@ sudo chmod +x /usr/local/bin/watchbpf-agent
 echo "[2/5] Creating config directory..."
 sudo mkdir -p /etc/watchbpf
 
+# Agar koi baseline nahi hai, ek khaali-but-valid seed banao
+# (learning mode mein khud-ba-khud grow hogi)
+if [ ! -f /etc/watchbpf/baseline.json ]; then
+    echo "[]" | sudo tee /etc/watchbpf/baseline.json > /dev/null
+    echo "  Created fresh baseline at /etc/watchbpf/baseline.json"
+    echo "  TIP: run 'sudo watchbpf-agent -mode=learn -state=/etc/watchbpf/baseline.json'"
+    echo "  for a few minutes before switching to filter mode, to reduce noise."
+fi
+
 echo "[3/5] Installing systemd service..."
 sudo cp deploy/systemd/watchbpf.service /etc/systemd/system/watchbpf.service
 sudo systemctl daemon-reload
