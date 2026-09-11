@@ -25,6 +25,7 @@ import (
 	"github.com/sonujha78/watchbpf/internal/enforce"
 	"github.com/sonujha78/watchbpf/internal/embedded"
 	"github.com/sonujha78/watchbpf/internal/audit"
+	"github.com/sonujha78/watchbpf/internal/config"
 	"strings"
 )
 
@@ -73,6 +74,8 @@ var (
 	mode       = flag.String("mode", "learn", "learn | filter")
 	statePath  = flag.String("state", "baseline.json", "path to baseline allowlist file")
 	promptPath = flag.String("prompt", "prompts/v1.txt", "path to LLM prompt template")
+	configPath = flag.String("config", "/etc/watchbpf/config.yaml", "path to YAML config file (optional)")
+	cfg        *config.Config
 	store      *baseline.Store
 	llmClient  llm.Client
 	policyEngine *policy.Engine
@@ -81,6 +84,12 @@ var (
 
 func main() {
 	flag.Parse()
+
+	var cfgErr error
+	cfg, cfgErr = config.Load(*configPath)
+	if cfgErr != nil {
+		log.Fatalf("loading config: %v", cfgErr)
+	}
 
 	if *mode != "learn" && *mode != "filter" {
 		log.Fatalf("invalid -mode %q: must be 'learn' or 'filter'", *mode)
@@ -103,8 +112,8 @@ func main() {
 		}
 	}
 
-	policyEngine = policy.NewEngine(*enforceMode)
-	log.Printf("Policy engine initialized (enforce=%s)", *enforceMode)
+	policyEngine = policy.NewEngine(*enforceMode, cfg.ProtectedProcesses, cfg.RateLimit.MaxPerMinute, cfg.Thresholds.Alert, cfg.Thresholds.Soft, cfg.Thresholds.Hard)
+	log.Printf("Policy engine initialized (enforce=%s, thresholds=%d/%d/%d, rate_limit=%d/min, protected=%d procs)", *enforceMode, cfg.Thresholds.Alert, cfg.Thresholds.Soft, cfg.Thresholds.Hard, cfg.RateLimit.MaxPerMinute, len(cfg.ProtectedProcesses))
 
 	var err2 error
 	auditLogger, err2 = audit.NewLogger("/var/log/watchbpf-audit.log")

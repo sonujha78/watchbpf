@@ -34,24 +34,27 @@ type Engine struct {
 	actionWindow  time.Duration
 	maxActionsPerWindow int
 	actionTimestamps []time.Time
+
+	thresholdAlert int
+	thresholdSoft  int
+	thresholdHard  int
 }
 
-func NewEngine(enforceMode string) *Engine {
+// NewEngine, config ke thresholds/protected-list/rate-limit ke saath policy engine banata hai
+func NewEngine(enforceMode string, protectedList []string, maxActionsPerWindow int, thresholdAlert, thresholdSoft, thresholdHard int) *Engine {
+	protectedMap := make(map[string]bool)
+	for _, p := range protectedList {
+		protectedMap[p] = true
+	}
+
 	return &Engine{
-		enforceMode: enforceMode,
-		protectedComms: map[string]bool{
-			"systemd":        true,
-			"sshd":           true,
-			"init":           true,
-			"kubelet":        true,
-			"containerd":     true,
-			"dockerd":        true,
-			"watchbpf-agent": true,
-			"NetworkManager": true,
-			"code":           true, // VS Code — dev machine safety, remove in real prod deployment
-		},
+		enforceMode:         enforceMode,
+		protectedComms:      protectedMap,
 		actionWindow:        1 * time.Minute,
-		maxActionsPerWindow: 5,
+		maxActionsPerWindow: maxActionsPerWindow,
+		thresholdAlert:      thresholdAlert,
+		thresholdSoft:       thresholdSoft,
+		thresholdHard:       thresholdHard,
 	}
 }
 
@@ -59,11 +62,11 @@ func NewEngine(enforceMode string) *Engine {
 func (e *Engine) Evaluate(comm string, score int) Decision {
 	var tier Tier
 	switch {
-	case score >= 90:
+	case score >= e.thresholdHard:
 		tier = TierHard
-	case score >= 70:
+	case score >= e.thresholdSoft:
 		tier = TierSoft
-	case score >= 40:
+	case score >= e.thresholdAlert:
 		tier = TierAlert
 	default:
 		tier = TierLog
