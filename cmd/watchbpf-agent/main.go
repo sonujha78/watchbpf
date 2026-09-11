@@ -44,11 +44,14 @@ type openEvent struct {
 	Filename [256]byte
 }
 type connectEvent struct {
-	Pid     uint32
-	Uid     uint32
-	Comm    [16]byte
-	DstAddr uint32
-	DstPort uint16
+	Pid      uint32
+	Uid      uint32
+	Comm     [16]byte
+	IsIPv6   uint8
+	IPv6Addr [16]byte
+	_        [3]byte // C compiler padding before DstAddr (4-byte alignment) — must match manually, binary.Read doesn't auto-pad
+	DstAddr  uint32
+	DstPort  uint16
 }
 
 type probeConfig struct {
@@ -251,9 +254,16 @@ func readLoop(label string, rd *ringbuf.Reader) {
 			if err := binary.Read(buf, binary.LittleEndian, &ev); err != nil {
 				continue
 			}
-			ip := make(net.IP, 4)
-			binary.LittleEndian.PutUint32(ip, ev.DstAddr)
-			comm, detail, pid, uid = cstr(ev.Comm[:]), fmt.Sprintf("%s:%d", ip.String(), ev.DstPort), ev.Pid, ev.Uid
+			var ipStr string
+			if ev.IsIPv6 == 1 {
+				ip := net.IP(ev.IPv6Addr[:])
+				ipStr = "[" + ip.String() + "]"
+			} else {
+				ip := make(net.IP, 4)
+				binary.LittleEndian.PutUint32(ip, ev.DstAddr)
+				ipStr = ip.String()
+			}
+			comm, detail, pid, uid = cstr(ev.Comm[:]), fmt.Sprintf("%s:%d", ipStr, ev.DstPort), ev.Pid, ev.Uid
 		}
 
 		metrics.EventsProcessed.WithLabelValues(label).Inc()

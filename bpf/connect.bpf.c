@@ -11,8 +11,10 @@ struct connect_event {
     __u32 pid;
     __u32 uid;
     char comm[TASK_COMM_LEN];
-    __u32 dst_addr;   // IPv4 destination, network byte order
-    __u16 dst_port;   // destination port, host byte order
+    __u8  is_ipv6;       // 0 = IPv4, 1 = IPv6
+    __u8  ipv6_addr[16]; // IPv6 hone par use hoga
+    __u32 dst_addr;      // IPv4 hone par use hoga (network byte order)
+    __u16 dst_port;      // dono ke liye common, host byte order
 };
 
 struct {
@@ -24,14 +26,13 @@ SEC("tp/syscalls/sys_enter_connect")
 int handle_connect(struct trace_event_raw_sys_enter *ctx)
 {
     struct connect_event *e;
-    struct sockaddr_in addr = {};
+    __u16 family = 0;
 
-    // arg[1] is `struct sockaddr *uservaddr`
     const void *uservaddr = (const void *)ctx->args[1];
-    bpf_probe_read_user(&addr, sizeof(addr), uservaddr);
+    bpf_probe_read_user(&family, sizeof(family), uservaddr);
 
-    // Sirf IPv4 (AF_INET = 2) events lo abhi ke liye — IPv6 baad mein add karenge
-    if (addr.sin_family != 2) {
+    // Sirf IPv4 (2) aur IPv6 (10) events lo, baaki (Unix sockets etc.) skip karo
+    if (family != 2 && family != 10) {
         return 0;
     }
 
@@ -39,12 +40,27 @@ int handle_connect(struct trace_event_raw_sys_enter *ctx)
     if (!e) {
         return 0;
     }
+    __builtin_memset(e, 0, sizeof(*e));
 
     e->pid = bpf_get_current_pid_tgid() >> 32;
     e->uid = bpf_get_current_uid_gid() & 0xFFFFFFFF;
     bpf_get_current_comm(&e->comm, sizeof(e->comm));
-    e->dst_addr = addr.sin_addr.s_addr;
-    e->dst_port = __builtin_bswap16(addr.sin_port); // network->host byte order
+
+    if (family == 2) {
+        // IPv4
+        struct sockaddr_in addr = {};
+        bpf_probe_read_user(&addr, sizeof(addr), uservaddr);
+        e->is_ipv6 = 0;
+        e->dst_addr = addr.sin_addr.s_addr;
+        e->dst_port = __builtin_bswap16(addr.sin_port);
+    } else {
+        // IPv6
+        struct sockaddr_in6 addr6 = {};
+        bpf_probe_read_user(&addr6, sizeof(addr6), uservaddr);
+        e->is_ipv6 = 1;
+        __builtin_memcpy(e->ipv6_addr, &addr6.sin6_addr, 16);
+        e->dst_port = __builtin_bswap16(addr6.sin6_port);
+    }
 
     bpf_ringbuf_submit(e, 0);
     return 0;
