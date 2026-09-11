@@ -114,6 +114,35 @@ docker run --rm \
 
 ---
 
+## Configuration
+
+WatchBPF works out of the box with sensible defaults (CLI flags for `-mode`, `-enforce`, `-state`). For fine-grained control, create `/etc/watchbpf/config.yaml`:
+
+```yaml
+thresholds:
+  alert: 40
+  soft: 70
+  hard: 90
+
+protected_processes:
+  - systemd
+  - sshd
+  - kubelet
+  - containerd
+  - watchbpf-agent
+
+rate_limit:
+  max_per_minute: 50
+
+llm:
+  ollama_model: llama3.1:8b
+  ollama_url: http://localhost:11434
+```
+
+The config file is optional — if it doesn't exist, WatchBPF falls back to defaults automatically. Any field you omit also falls back to its default.
+
+---
+
 ## Safety Guardrails
 
 WatchBPF can terminate processes and firewall IPs — that capability is treated as non-negotiable to guard carefully:
@@ -146,12 +175,10 @@ Protected processes and rate-limited events are automatically downgraded to Aler
 ## Known Limitations
 
 - Local Ollama models are noticeably slower than Gemini's API and can fall behind under bursty event volume — the rate-limiting guardrail exists specifically to handle this gracefully.
-- Configuration is currently via CLI flags only (`-mode`, `-enforce`, `-state`); a YAML config file is planned but not yet implemented.
 - IPv6 `connect` events are not yet captured (IPv4 only).
 
 ## Roadmap
 
-- [ ] YAML-based configuration
 - [ ] Helm chart / K8s DaemonSet
 - [ ] arm64 support
 - [ ] Prometheus metrics endpoint
