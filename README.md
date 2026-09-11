@@ -143,6 +143,25 @@ The config file is optional — if it doesn't exist, WatchBPF falls back to defa
 
 ---
 
+## Observability
+
+WatchBPF exposes a Prometheus-compatible `/metrics` endpoint (default `:9090/metrics`, configurable via `-metrics-addr`):
+
+```bash
+curl localhost:9090/metrics
+```
+
+Tracked metrics include:
+- `watchbpf_events_processed_total{event_type}` — raw kernel events seen, by type
+- `watchbpf_events_escalated_total{event_type}` — events that passed the baseline filter
+- `watchbpf_events_rate_limited_total` — escalations skipped due to rate limiting
+- `watchbpf_llm_calls_total{backend,result}` — LLM calls by backend and success/error
+- `watchbpf_decisions_total{tier}` — policy decisions by tier (log/alert/soft/hard)
+
+Point any Prometheus instance at this endpoint to build dashboards or alerts — no additional setup required on WatchBPF's side.
+
+---
+
 ## Safety Guardrails
 
 WatchBPF can terminate processes and firewall IPs — that capability is treated as non-negotiable to guard carefully:
@@ -181,7 +200,6 @@ Protected processes and rate-limited events are automatically downgraded to Aler
 
 - [ ] Helm chart / K8s DaemonSet
 - [ ] arm64 support
-- [ ] Prometheus metrics endpoint
 - [ ] Public launch
 
 ## License
