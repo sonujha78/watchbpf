@@ -6,7 +6,7 @@ WatchBPF traces critical syscalls at the kernel level using eBPF/CO-RE, filters 
 
 Single static binary. No vendor lock-in. Bring your own key, or run fully offline.
 
-> **Status:** Core engine (kernel tracing → baseline filter → AI scoring → policy-based enforcement) complete and tested. Packaging in progress.
+> **Status:** Core engine, packaging, and cross-platform support are complete and tested — including a from-scratch build and live test on real ARM64 hardware (AWS Graviton).
 
 ---
 
@@ -22,6 +22,7 @@ Most open eBPF security tools stop at detection: they fire an alert and leave tr
 | Free, zero mandatory API cost | ✅ | ✅ | ✅ (BYOK, or fully offline via Ollama) |
 | Single static binary | ❌ | ❌ | ✅ |
 | Beginner-friendly install | ❌ | ❌ | ✅ One-command install script |
+| ARM64 support | ✅ | ✅ | ✅ (tested on real hardware) |
 
 WatchBPF isn't claiming to be the first eBPF security tool — it combines AI-driven reasoning with real enforcement in a package anyone can install and run for free.
 
@@ -37,66 +38,42 @@ flowchart TD
     D --> E[Enforcement: log / alert / pause / kill / isolate]
 ```
 
-1. **eBPF probes** trace `execve` (with arguments), `openat`, and `connect` at the kernel level with near-zero overhead.
+1. **eBPF probes** trace `execve` (with arguments), `openat`, and `connect` (IPv4 and IPv6) at the kernel level with near-zero overhead.
 2. A **baseline/allowlist filter** learns normal system behavior during an initial learning window, normalizing numeric tokens (PIDs, etc.) so dynamic-but-benign patterns don't cause noise. Only genuinely novel events get escalated — this is what keeps LLM usage low.
 3. Escalated events are packaged into a compact "event story" and sent to an **LLM** — your own Gemini API key, or a local Ollama model as a free, fully offline fallback — which returns a structured threat score, MITRE ATT&CK tactic, and recommended action. LLM calls run asynchronously and are concurrency-limited so a slow response never blocks event capture.
 4. A **policy engine** applies tiered, threshold-based decisions with safety guardrails: dry-run mode by default, a protected-process list, and a rate limit on escalations per minute to prevent LLM overload or action storms.
 5. When enabled (`-enforce=live`), the **enforcement module** can pause (SIGSTOP) or kill (SIGKILL) processes and isolate suspicious IPs via nftables.
+6. Every decision — including rate-limited ones — is written to a **tamper-evident, hash-chained audit log**.
+
+**Supported architectures:** x86_64 and ARM64 (verified on real AWS Graviton hardware).
 
 ---
 
-## Quick Start
+## How to Use WatchBPF
 
-### Requirements
+WatchBPF can be run three ways depending on your setup. Pick whichever fits — all three run the exact same engine.
 
-- Linux kernel 5.15+ with BTF support (`/sys/kernel/btf/vmlinux` must exist)
-- x86_64 (arm64 support planned)
+### Option 1 — Bare metal / VM (systemd), the simplest way
 
-### Install
+Best for: a single server, VPS, or personal machine you want protected directly.
 
 ```bash
 git clone https://github.com/sonujha78/watchbpf.git
 cd watchbpf
 bash deploy/install.sh
-```
-
-### Run (dry-run mode, safe by default)
-
-```bash
 sudo systemctl start watchbpf
 sudo journalctl -u watchbpf -f
 ```
 
-WatchBPF starts in **dry-run mode**: it observes and logs what it *would* do, without taking any action. Review its behavior on your system for a while before enabling live enforcement.
+That's it — WatchBPF is now running in **dry-run mode** (observing and logging, taking no action). See [Configuration](#configuration) below to add an AI key or tune settings, and [Enabling Live Enforcement](#enabling-live-enforcement) when you're ready for it to actually act.
 
-### Add your own LLM backend (optional)
+### Option 2 — Docker
 
-WatchBPF works out of the box via a local Ollama model — no cost, fully offline. To use Gemini's free tier instead:
-
-```bash
-sudo mkdir -p /etc/watchbpf
-sudo nano /etc/watchbpf/gemini.key
-# paste your free Gemini API key from https://aistudio.google.com/app/apikey
-sudo chmod 600 /etc/watchbpf/gemini.key
-sudo systemctl restart watchbpf
-```
-
-### Enable live enforcement (only after reviewing dry-run behavior)
-
-Edit `/etc/systemd/system/watchbpf.service` and change `-enforce=dry-run` to `-enforce=live`, then:
+Best for: running WatchBPF alongside other containerized services, or when you don't want to install anything system-wide.
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl restart watchbpf
-```
-
----
-
-## Run with Docker
-
-A Docker image is available for containerized deployments. Because WatchBPF traces kernel syscalls, the container needs elevated privileges:
-
-```bash
+git clone https://github.com/sonujha78/watchbpf.git
+cd watchbpf
 docker build -t watchbpf:latest .
 
 docker run --rm \
@@ -108,9 +85,26 @@ docker run --rm \
   watchbpf:latest
 ```
 
-- `--privileged` and `--pid=host` are required for eBPF to trace host processes from inside the container.
-- Mount `/etc/watchbpf` to persist your baseline and Gemini key across container restarts.
-- The container's kernel dependency is the **host kernel** (5.15+, BTF-enabled) — containers don't carry their own kernel.
+`--privileged` and `--pid=host` are required because WatchBPF traces syscalls across the entire host, not just its own container. Mount `/etc/watchbpf` so your baseline and config persist across container restarts. The container always traces the **host kernel** — containers don't carry their own kernel.
+
+### Option 3 — Kubernetes (Helm)
+
+Best for: protecting every node in a cluster. WatchBPF runs as a DaemonSet — one pod per node, each watching its own node's kernel.
+
+```bash
+git clone https://github.com/sonujha78/watchbpf.git
+cd watchbpf
+docker build -t watchbpf:latest .
+# push watchbpf:latest to a registry your cluster can pull from, or load it directly (e.g. `minikube image load watchbpf:latest` for local testing)
+
+helm install watchbpf deploy/helm/watchbpf/ \
+  --set geminiApiKey="your-key-here"   # omit this line to use local Ollama instead
+
+kubectl get pods -l app=watchbpf
+kubectl logs -l app=watchbpf --tail=50
+```
+
+Adjust thresholds, enforcement mode, and resource limits in `deploy/helm/watchbpf/values.yaml` before installing, or override them with `--set` flags.
 
 ---
 
@@ -141,24 +135,21 @@ llm:
 
 The config file is optional — if it doesn't exist, WatchBPF falls back to defaults automatically. Any field you omit also falls back to its default.
 
----
+### Adding your own LLM backend (optional)
 
-## Observability
-
-WatchBPF exposes a Prometheus-compatible `/metrics` endpoint (default `:9090/metrics`, configurable via `-metrics-addr`):
+WatchBPF works out of the box via a local Ollama model — no cost, fully offline. To use Gemini's free tier instead:
 
 ```bash
-curl localhost:9090/metrics
+sudo mkdir -p /etc/watchbpf
+sudo nano /etc/watchbpf/gemini.key
+# paste your free Gemini API key from https://aistudio.google.com/app/apikey
+sudo chmod 600 /etc/watchbpf/gemini.key
+sudo systemctl restart watchbpf
 ```
 
-Tracked metrics include:
-- `watchbpf_events_processed_total{event_type}` — raw kernel events seen, by type
-- `watchbpf_events_escalated_total{event_type}` — events that passed the baseline filter
-- `watchbpf_events_rate_limited_total` — escalations skipped due to rate limiting
-- `watchbpf_llm_calls_total{backend,result}` — LLM calls by backend and success/error
-- `watchbpf_decisions_total{tier}` — policy decisions by tier (log/alert/soft/hard)
+### Enabling Live Enforcement
 
-Point any Prometheus instance at this endpoint to build dashboards or alerts — no additional setup required on WatchBPF's side.
+By default WatchBPF only observes and logs. To let it actually pause/kill processes and isolate IPs, edit `/etc/systemd/system/watchbpf.service` (or your Helm `values.yaml`) and change `-enforce=dry-run` to `-enforce=live`, then restart. **Review dry-run output for a while first** — see what it *would* have done before letting it act.
 
 ---
 
@@ -191,16 +182,29 @@ Protected processes and rate-limited events are automatically downgraded to Aler
 
 ---
 
+## Observability
+
+WatchBPF exposes a Prometheus-compatible `/metrics` endpoint (default `:9090/metrics`, configurable via `-metrics-addr`):
+
+```bash
+curl localhost:9090/metrics
+```
+
+Tracked metrics include:
+- `watchbpf_events_processed_total{event_type}` — raw kernel events seen, by type
+- `watchbpf_events_escalated_total{event_type}` — events that passed the baseline filter
+- `watchbpf_events_rate_limited_total` — escalations skipped due to rate limiting
+- `watchbpf_llm_calls_total{backend,result}` — LLM calls by backend and success/error
+- `watchbpf_decisions_total{tier}` — policy decisions by tier (log/alert/soft/hard)
+
+Point any Prometheus instance at this endpoint to build dashboards or alerts — no additional setup required on WatchBPF's side.
+
+---
+
 ## Known Limitations
 
 - Local Ollama models are noticeably slower than Gemini's API and can fall behind under bursty event volume — the rate-limiting guardrail exists specifically to handle this gracefully.
-- IPv6 `connect` events are not yet captured (IPv4 only).
-
-## Roadmap
-
-- [ ] Helm chart / K8s DaemonSet
-- [ ] arm64 support
-- [ ] Public launch
+- Docker/Kubernetes deployments track the host kernel, not container-internal state — baselines should be seeded per-node.
 
 ## License
 
