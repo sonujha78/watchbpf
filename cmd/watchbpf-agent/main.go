@@ -26,6 +26,7 @@ import (
 	"github.com/sonujha78/watchbpf/internal/embedded"
 	"github.com/sonujha78/watchbpf/internal/audit"
 	"github.com/sonujha78/watchbpf/internal/config"
+	"github.com/sonujha78/watchbpf/internal/metrics"
 	"strings"
 )
 
@@ -75,6 +76,7 @@ var (
 	statePath  = flag.String("state", "baseline.json", "path to baseline allowlist file")
 	promptPath = flag.String("prompt", "prompts/v1.txt", "path to LLM prompt template")
 	configPath = flag.String("config", "/etc/watchbpf/config.yaml", "path to YAML config file (optional)")
+	metricsAddr = flag.String("metrics-addr", ":9090", "address for Prometheus /metrics endpoint")
 	cfg        *config.Config
 	store      *baseline.Store
 	llmClient  llm.Client
@@ -113,6 +115,8 @@ func main() {
 	}
 
 	policyEngine = policy.NewEngine(*enforceMode, cfg.ProtectedProcesses, cfg.RateLimit.MaxPerMinute, cfg.Thresholds.Alert, cfg.Thresholds.Soft, cfg.Thresholds.Hard)
+
+	metrics.StartServer(*metricsAddr)
 	log.Printf("Policy engine initialized (enforce=%s, thresholds=%d/%d/%d, rate_limit=%d/min, protected=%d procs)", *enforceMode, cfg.Thresholds.Alert, cfg.Thresholds.Soft, cfg.Thresholds.Hard, cfg.RateLimit.MaxPerMinute, len(cfg.ProtectedProcesses))
 
 	var err2 error
@@ -252,6 +256,7 @@ func readLoop(label string, rd *ringbuf.Reader) {
 			comm, detail, pid, uid = cstr(ev.Comm[:]), fmt.Sprintf("%s:%d", ip.String(), ev.DstPort), ev.Pid, ev.Uid
 		}
 
+		metrics.EventsProcessed.WithLabelValues(label).Inc()
 		handleEvent(label, comm, detail, pid, uid)
 	}
 }
@@ -278,6 +283,7 @@ func handleEvent(eventType, comm, detail string, pid, uid uint32) {
 		return
 	}
 
+	metrics.EventsEscalated.WithLabelValues(eventType).Inc()
 	fmt.Printf("[ESCALATE]\t%s\t\t%s\t\t%s\n", eventType, comm, detail)
 
 	// Rate-limit guard: agar 1 minute mein 50 se zyada escalations ho jaayein,
@@ -292,6 +298,7 @@ func handleEvent(eventType, comm, detail string, pid, uid uint32) {
 	escalationMu.Unlock()
 
 	if overLimit {
+		metrics.EventsRateLimited.Inc()
 		fmt.Printf("[RATE-LIMITED]\tescalation storm detected — skipping LLM call for this event\n")
 		if auditLogger != nil {
 			auditLogger.Log(eventType, comm, detail, pid, -1, "rate_limited", "escalation storm — LLM call skipped", "")
@@ -320,14 +327,17 @@ func processLLM(eventType, comm, detail string, pid, uid uint32) {
 	story := llm.EventStory{EventType: eventType, Comm: comm, Detail: detail, PID: pid, UID: uid}
 	assessment, err := llmClient.Assess(ctx, story)
 	if err != nil {
+		metrics.LLMCalls.WithLabelValues(llmClient.Name(), "error").Inc()
 		log.Printf("[LLM-ERROR] %v — falling back to log-only", err)
 		return
 	}
+	metrics.LLMCalls.WithLabelValues(llmClient.Name(), "success").Inc()
 
 	fmt.Printf("[AI-VERDICT]\tscore=%d\tlabel=%s\ttactic=%s\taction=%s\treason=%q\n",
 		assessment.ThreatScore, assessment.Label, assessment.MitreTactic, assessment.Action, assessment.Rationale)
 
 	decision := policyEngine.Evaluate(comm, assessment.ThreatScore)
+	metrics.Decisions.WithLabelValues(string(decision.Tier)).Inc()
 	fmt.Printf("[DECISION]\ttier=%s\treason=%q\n", decision.Tier, decision.Reason)
 
 	if auditLogger != nil {
