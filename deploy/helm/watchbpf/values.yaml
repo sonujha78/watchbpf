@@ -1,0 +1,24 @@
+image:
+  repository: watchbpf
+  tag: latest
+  pullPolicy: IfNotPresent
+
+enforce: dry-run   # dry-run | live
+mode: filter       # learn | filter
+
+geminiApiKey: ""   # optional — leave empty to use local Ollama fallback
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+metrics:
+  enabled: true
+  port: 9090
+
+tolerations:
+  - operator: Exists   # sab nodes pe chale, taints ke bawajood (security tool ke liye zaroori)

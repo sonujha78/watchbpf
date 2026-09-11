@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: watchbpf
+  labels:
+    app: watchbpf
+spec:
+  selector:
+    matchLabels:
+      app: watchbpf
+  template:
+    metadata:
+      labels:
+        app: watchbpf
+    spec:
+      hostPID: true
+      tolerations:
+{{- toYaml .Values.tolerations | nindent 8 }}
+      containers:
+        - name: watchbpf
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "-mode={{ .Values.mode }}"
+            - "-enforce={{ .Values.enforce }}"
+            - "-state=/etc/watchbpf/baseline.json"
+          securityContext:
+            privileged: true
+          ports:
+            - containerPort: {{ .Values.metrics.port }}
+              name: metrics
+          resources:
+{{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: sys-kernel-debug
+              mountPath: /sys/kernel/debug
+            - name: sys-kernel-btf
+              mountPath: /sys/kernel/btf
+              readOnly: true
+            - name: config
+              mountPath: /etc/watchbpf
+          {{- if .Values.geminiApiKey }}
+          env:
+            - name: WATCHBPF_GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: watchbpf-gemini-key
+                  key: apiKey
+          {{- end }}
+      volumes:
+        - name: sys-kernel-debug
+          hostPath:
+            path: /sys/kernel/debug
+        - name: sys-kernel-btf
+          hostPath:
+            path: /sys/kernel/btf
+        - name: config
+          hostPath:
+            path: /etc/watchbpf
+            type: DirectoryOrCreate

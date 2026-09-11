@@ -1,0 +1,6 @@
+apiVersion: v2
+name: watchbpf
+description: eBPF + LLM based real-time Linux kernel threat detection and remediation
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
